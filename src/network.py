@@ -11,8 +11,11 @@ from torchvision import models
 from torchvision.models.alexnet import AlexNet
 import torch
 
+#wandb
+import wandb
+
 # Custom packages
-from src.metric import MyAccuracy
+from src.metric import MyAccuracy, MyF1Score
 import src.config as cfg
 from src.util import show_setting
 
@@ -23,7 +26,11 @@ class MyNetwork(AlexNet):
         super().__init__()
 
         # [TODO] Modify feature extractor part in AlexNet
-
+        # self.features = nn.Sequential(
+        #     nn.Conv2d(3, 64, )
+        # )
+        # # kernal fusion
+        # self.classifier =
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # [TODO: Optional] Modify this as well if you want
@@ -56,6 +63,7 @@ class SimpleClassifier(LightningModule):
 
         # Metric
         self.accuracy = MyAccuracy()
+        self.f1score = MyF1Score()
 
         # Hyperparameters
         self.save_hyperparameters()
@@ -81,6 +89,7 @@ class SimpleClassifier(LightningModule):
         accuracy = self.accuracy(scores, y)
         self.log_dict({'loss/train': loss, 'accuracy/train': accuracy},
                       on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        #self.wandb_log_f1socre(batch_idx, cfg.NUM_CLASSES, scores, y, cfg.WANDB_IMG_LOG_FREQ)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -89,6 +98,7 @@ class SimpleClassifier(LightningModule):
         self.log_dict({'loss/val': loss, 'accuracy/val': accuracy},
                       on_step=False, on_epoch=True, prog_bar=True, logger=True)
         self._wandb_log_image(batch, batch_idx, scores, frequency = cfg.WANDB_IMG_LOG_FREQ)
+        self.wandb_log_f1socre(batch_idx, cfg.NUM_CLASSES, scores, y, cfg.WANDB_IMG_LOG_FREQ)
 
     def _common_step(self, batch):
         x, y = batch
@@ -109,3 +119,20 @@ class SimpleClassifier(LightningModule):
                 key=f'pred/val/batch{batch_idx:5d}_sample_0',
                 images=[x[0].to('cpu')],
                 caption=[f'GT: {y[0].item()}, Pred: {preds[0].item()}'])
+            
+    # def wandb_log_f1socre_table(self, batch_idx, cls_num, scores, y, freq):
+    #     if batch_idx % freq == 0:
+    #         f1_score = self.f1score(cls_num, scores, y)
+    #         f1_score = f1_score.tolist()
+    #         cls = [f'Class {i:3d}' for i in range(len(f1_score))]
+    #         data = list(zip(cls, f1_score))
+    #         table = wandb.Table(columns=["Class", "F1 Score"])
+    #         for i in range(len(f1_score)):
+    #             table.add_data(f'Class {i:3d}', f1_score[i])
+    #         self.logger.log_table(key="F1 Score per Class", columns=["Class", "F1 Score"], data=data)
+
+    def wandb_log_f1socre(self, batch_idx, cls_num, scores, y, freq):
+        if batch_idx % freq == 0:
+            f1_score = self.f1score(cls_num, scores, y)
+            for i in range(len(f1_score)):
+                self.log(f'Class{i:3d}', f1_score[i], on_step=False, on_epoch=True, prog_bar=True, logger=True)
