@@ -9,3 +9,6 @@ torchvision==0.17.2
 tqdm==4.66.2
 wandb==0.16.6
 wget==3.2
+onnx==1.16.0
+tensorrt==10.0.1
+pycuda==2024.1

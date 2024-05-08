@@ -1,0 +1,38 @@
+defaults:
+  - _self_
+  - wandb
+  - data
+
+#Override hydra default dir
+# hydra:
+#   run:
+#     dir: .
+
+#Training Setting
+NUM_CLASSES: 200
+BATCH_SIZE: 512
+VAL_EVERY_N_EPOCH: 1
+
+NUM_EPOCHS: 100
+
+OPTIMIZER_PARAMS:
+  type: SGD
+  lr: 0.005
+  momentum: 0.9
+
+SCHEDULER_PARAMS:
+  type: MultiStepLR
+  milestones: [30, 35]
+  gamma: 0.2
+
+MODEL_NAME: alexnet
+
+ACCELERATOR: gpu
+DEVICES: [0]
+PRECISION_STR: 32-true
+
+#ONNX exportation
+EXPORT: true
+
+#Test ckpt file location
+CKPT: /home/sungjin/Codes/AUE8088-PA1/wandb/aue8088-pa1/reiz0qiv/checkpoints/epoch=49-step=9800.ckpt

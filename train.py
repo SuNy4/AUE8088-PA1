@@ -12,14 +12,23 @@ import torch
 # Custom packages
 from src.dataset import TinyImageNetDatasetModule
 from src.network import SimpleClassifier
-import src.config as cfg
+#import src.config as cfg
+
+# Using hydra for config management
+import os
+import hydra
+from omegaconf import DictConfig
 
 torch.set_float32_matmul_precision('medium')
 
-
-if __name__ == "__main__":
+@hydra.main(config_path='config', config_name='config.yaml', version_base='1.1')
+def train(cfg: DictConfig):
+    cfg.WANDB_ENTITY = os.environ.get('WANDB_ENTITY')
+    cfg.WANDB_NAME = f'{cfg.MODEL_NAME}-B{cfg.BATCH_SIZE}-{cfg.OPTIMIZER_PARAMS["type"]}'
+    cfg.WANDB_NAME += f'-{cfg.SCHEDULER_PARAMS["type"]}{cfg.OPTIMIZER_PARAMS["lr"]:.1E}'
 
     model = SimpleClassifier(
+        cfg=cfg,
         model_name = cfg.MODEL_NAME,
         num_classes = cfg.NUM_CLASSES,
         optimizer_params = cfg.OPTIMIZER_PARAMS,
@@ -27,6 +36,7 @@ if __name__ == "__main__":
     )
 
     datamodule = TinyImageNetDatasetModule(
+        cfg=cfg,
         batch_size = cfg.BATCH_SIZE,
     )
 
@@ -52,3 +62,6 @@ if __name__ == "__main__":
 
     trainer.fit(model, datamodule=datamodule)
     trainer.validate(ckpt_path='best', datamodule=datamodule)
+
+if __name__=="__main__":
+    train()

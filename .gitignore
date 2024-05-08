@@ -124,3 +124,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Hydra Settings & Wandb logs
+outputs/
+wandb/
