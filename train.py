@@ -18,10 +18,11 @@ from src.network import SimpleClassifier
 import os
 import hydra
 from omegaconf import DictConfig
+import wandb
 
 torch.set_float32_matmul_precision('medium')
 
-@hydra.main(config_path='config', config_name='config.yaml', version_base='1.1')
+@hydra.main(config_path='config', config_name='config.yaml', version_base=None)
 def train(cfg: DictConfig):
     cfg.WANDB_ENTITY = os.environ.get('WANDB_ENTITY')
     cfg.WANDB_NAME = f'{cfg.MODEL_NAME}-B{cfg.BATCH_SIZE}-{cfg.OPTIMIZER_PARAMS["type"]}'
@@ -62,6 +63,7 @@ def train(cfg: DictConfig):
 
     trainer.fit(model, datamodule=datamodule)
     trainer.validate(ckpt_path='best', datamodule=datamodule)
+    wandb.finish()
 
 if __name__=="__main__":
     train()
