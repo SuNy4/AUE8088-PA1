@@ -8,7 +8,8 @@ import time
 from lightning.pytorch import LightningModule
 from lightning.pytorch.loggers.wandb import WandbLogger
 from torch import nn
-from torchvision import models
+import torch.nn.functional as F
+from torchvision import models, ops
 from torchvision.models.alexnet import AlexNet
 import torch
 
@@ -16,8 +17,9 @@ import torch
 import wandb
 
 #Tensor RT
-import tensorrt as trt
+import numpy as np
 import pycuda.driver as cuda
+import tensorrt as trt
 
 # Custom packages
 from src.metric import MyAccuracy, MyF1Score
@@ -32,58 +34,133 @@ class MyNetwork(AlexNet):
         # [TODO] Modify feature extractor part in AlexNet
         #input img = 3x64x64
         self.features = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(3, 64, kernel_size=9, stride=3, padding=1),
             nn.ReLU(inplace=True),
-            # nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
-            # nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=4, stride=2, padding=1),
-            #64x32x32
+            nn.MaxPool2d(kernel_size=3, padding=1),
+            #64x19x19
             
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            # nn.Conv2d(128, 128, kernel_size=3, padding=1),
-            # nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=4, stride=2, padding=1),
-            #128x16x16
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            #128x10x10
 
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            # nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            # nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=4, stride=2, padding=1),
-            #256x8x8
-
-            nn.Conv2d(256, 512, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            # nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            # nn.ReLU(inplace=True),
-            #512x8x8
-
-            nn.Conv2d(512, 256, kernel_size=1),
-            nn.ReLU(inplace=True),
-            )
+            #256x4x4
+        )
         
-        # self.avgpool=nn.Sequential(
-
-        #     nn.AdaptiveAvgPool2d((6,6)),
-        #     #256x6x6
-        #     #nn.Dropout(p=dropout),
-        #     )
+        self.avgpool=nn.AdaptiveAvgPool2d((1,1))
         
-        # self.classifier=nn.Sequential(
-        #     nn.Linear(256*6*6, 4096),
-        #     nn.ReLU(inplace=True),
-        #     nn.Dropout(p=dropout),
-        #     nn.Linear(4096, 4096),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(4096, num_classes),
-        # )
+        self.classifier=nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(256, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, num_classes),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # [TODO: Optional] Modify this as well if you want
         x = self.features(x)
         x = self.avgpool(x)
-        x = torch.flatten(x, 1)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
+
+class layernorm2d(nn.LayerNorm):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Permute to B H W C for better calculation performance
+        x = x.permute(0, 2, 3, 1)
+        x = F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+        x = x.permute(0, 3, 1, 2)
+        return x
+    
+
+class ConvNextBlock(nn.Module):
+    def __init__(self, input_dim) -> None:
+        super().__init__()
+
+        self.block = nn.Sequential(
+        nn.Conv2d(input_dim, input_dim, kernel_size=5, padding=2, groups=input_dim, bias=True),
+        # permute for channel-wise linear calc.
+        ops.Permute([0, 2, 3, 1]),
+        nn.LayerNorm(input_dim),
+        nn.Linear(in_features=input_dim, out_features=4 * input_dim, bias=True),
+        nn.GELU(),
+        #nn.Dropout(p=0.5),
+        nn.Linear(in_features=4 * input_dim, out_features=input_dim, bias=True),
+        ops.Permute([0, 3, 1, 2])
+        )
+        
+        self.stochastic_depth = ops.StochasticDepth(0.1, "row")
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        result = self.block(input)
+        result = self.stochastic_depth(result)
+        result += input
+        return result
+
+
+def layer(input_dim, output_dim, n_block):
+    block = ConvNextBlock
+    layer = []
+
+    for _ in range(n_block):
+        layer.append(block(input_dim))
+    if output_dim is not None:
+        layer.append(nn.Sequential(
+            layernorm2d(input_dim),
+            nn.Conv2d(input_dim, output_dim, kernel_size=2, stride=2)
+        )
+        )
+
+    CNlayers = nn.Sequential(*layer)
+
+    return CNlayers
+
+
+class SOTAlike(AlexNet):
+    def __init__(self, num_classes, last_channel = 768):
+        super().__init__()
+        norm_layer = layernorm2d
+
+        self.base = ops.Conv2dNormActivation(
+            in_channels=3,
+            out_channels=96,
+            kernel_size=4,
+            stride=4,
+            padding=0,
+            norm_layer=norm_layer,
+            activation_layer=None,
+            bias=True,
+            )
+        
+        self.features = nn.Sequential(
+            layer(96, 192, 1),
+            layer(192, 384, 1),
+            layer(384, last_channel, 9),
+            layer(last_channel, None, 1),
+        )
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))
+        self.classifier = nn.Sequential(
+            norm_layer(last_channel), 
+            nn.Flatten(1), 
+            nn.Linear(last_channel, num_classes)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.base(x)
+        x = self.features(x)
+        x = self.avgpool(x)
         x = self.classifier(x)
         return x
 
@@ -100,6 +177,8 @@ class SimpleClassifier(LightningModule):
         # Network
         if model_name == 'MyNetwork':
             self.model = MyNetwork(num_classes)
+        elif model_name == 'SOTAlike':
+            self.model = SOTAlike(num_classes)
         else:
             models_list = models.list_models()
             assert model_name in models_list, f'Unknown model name: {model_name}. Choose one from {", ".join(models_list)}'
@@ -111,13 +190,8 @@ class SimpleClassifier(LightningModule):
         #Get config of hydra
         self.cfg = cfg
 
-        #Blank list for calculating F1 score at validation epoch end
-        self.valid_output = []
-        self.target = []
-
         # Metric
         self.accuracy = MyAccuracy()
-        #self.f1 = F1Score(task='multiclass', num_classes=num_classes)
         self.f1score = MyF1Score(cls_num=num_classes)
 
         # Hyperparameters
@@ -130,58 +204,52 @@ class SimpleClassifier(LightningModule):
     def configure_optimizers(self):
         optim_params = copy.deepcopy(self.hparams.optimizer_params)
         optim_type = optim_params.type
-        optimizer = getattr(torch.optim, optim_type)(self.parameters(), lr=optim_params.lr, momentum=optim_params.momentum)
+        optimizer = getattr(torch.optim, optim_type)(self.parameters(), lr=optim_params.lr)#, momentum=optim_params.momentum)
 
         scheduler_params = copy.deepcopy(self.hparams.scheduler_params)
         scheduler_type = scheduler_params.type
-        scheduler = getattr(torch.optim.lr_scheduler, scheduler_type)(optimizer, milestones=scheduler_params.milestones, gamma=scheduler_params.gamma)
+        scheduler = getattr(torch.optim.lr_scheduler, scheduler_type)(optimizer, gamma=scheduler_params.gamma)#, milestones=scheduler_params.milestones,)
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
     def forward(self, x):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        mode = "Train"
-        loss, scores, y, _ = self._common_step(batch, mode)
+        loss, scores, y, _ = self._common_step(batch)
         accuracy = self.accuracy(scores, y)
         self.log_dict({'loss/train': loss, 'accuracy/train': accuracy},
                       on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
+    def on_validation_batch_start(self, batch, batch_idx):
+        #Warm Up
+        x, y = batch
+        x = x.cuda()
+        sample = torch.randn_like(x).cuda()
+        for _ in range(10):
+            self.forward(sample)
+
     def validation_step(self, batch, batch_idx):
-        mode = "Val"
-        loss, scores, y, inf_t = self._common_step(batch, mode)
+        loss, scores, y, inf_t = self._common_step(batch)
         accuracy = self.accuracy(scores, y)
-        self.valid_output.append(scores)
-        self.target.append(y)
+        f1score = self.f1score.update(scores, y)
         self.log_dict({'loss/val': loss, 'accuracy/val': accuracy, 'InferenceTime(ms)/Val': inf_t,},
                       on_step=False, on_epoch=True, prog_bar=True, logger=True)
         self._wandb_log_image(batch, batch_idx, scores, frequency = self.cfg.WANDB_IMG_LOG_FREQ)
 
     def on_validation_epoch_end(self):
-        preds = torch.cat(self.valid_output, dim=0)
-        gt = torch.cat(self.target, dim=0)
-        self.wandb_log_f1socre(self.cfg.NUM_CLASSES, preds, gt)
-        # Clear valid, target variable for next epoch
-        self.valid_output=[]
-        self.target=[]
+        f1_score = self.f1score.compute()
+        for i in range(len(f1_score)):
+            self.log(f'Class{i:3d}', f1_score[i], on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
-    def _common_step(self, batch, mode):
+    def _common_step(self, batch):
         x, y = batch
 
-        # Warm up
-        if mode == "Val":
-            x = x.cuda()
-            sample = torch.randn_like(x).cuda()
-            for _ in range(10):
-                self.forward(sample)
-        
         #Check inference time
         start_t = time.time()  
         scores = self.forward(x)
-        fin_t = time.time()
 
-        inf_t = (fin_t-start_t)*1000
+        inf_t = (time.time()-start_t)*1000
         loss = self.loss_fn(scores, y)
         return loss, scores, y, inf_t
 
@@ -199,46 +267,57 @@ class SimpleClassifier(LightningModule):
                 images=[x[0].to('cpu')],
                 caption=[f'GT: {y[0].item()}, Pred: {preds[0].item()}'])
             
-    def wandb_log_f1socre(self, cls_num, scores, y):
-        f1_score = self.f1score(cls_num, scores, y)
-        for i in range(len(f1_score)):
-            self.log(f'Class{i:3d}', f1_score[i], on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
-    def load_RT_engine(filepath):           
-        file = open(filepath, "rb")
+class TRTclassifier(LightningModule):
+    def __init__(self,
+                num_classes: int = 200,
+                file_path: str = 'file_path',
+                optimizer_params: Dict = dict(),
+                scheduler_params: Dict = dict(),
+                ): 
+        super().__init__()
+        self.stream = None
+        self.filepath = file_path
+        self.num_classes = num_classes
+        self.accuracy = MyAccuracy()
+        self.f1score = MyF1Score(cls_num=num_classes)
+    
+    def load_RT_engine(self, filepath):
+        # Loading Engine         
+        file=open(filepath, "rb")
         
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
         runtime = trt.Runtime(TRT_LOGGER)
 
-        engine = runtime.deserialize_cuda_engine(file.read)
+        engine=runtime.deserialize_cuda_engine(file.read)
+        self.context=engine.create_execution_context()
         
     def allocate_memory(self, batch):
-        self.output = np.empty(self.num_classes, dtype=self.target_dtype) # Need to set both input and output precisions to FP16 to fully enable FP16
+        self.output = np.empty(self.num_classes, dtype=np.float32) 
 
-        # Allocate device memory
-        self.d_input = cuda.mem_alloc(1 * batch.nbytes)
-        self.d_output = cuda.mem_alloc(1 * self.output.nbytes)
+        self.d_input = cuda.mem_alloc(1*batch.nbytes)
+        self.d_output = cuda.mem_alloc(1*self.output.nbytes)
 
         self.bindings = [int(self.d_input), int(self.d_output)]
 
         self.stream = cuda.Stream()
 
-    def predict(self, batch, eval_exec_time = False): # result gets copied into output
-        if self.stream is None:
-            self.allocate_memory(batch)
-
-        # Transfer input data to device
+    def validation_step(self, batch):
+        x, y = batch
+        self.allocate_memory(batch)
+        # Async host to device, need to specify stream
         cuda.memcpy_htod_async(self.d_input, batch, self.stream)
 
-        # Execute model
-        if eval_exec_time:
-            t_start = time.time()
+        t_start = time.time()
         self.context.execute_async_v2(self.bindings, self.stream.handle, None)
-        if eval_exec_time:
-            t_inference = time.time() - t_start
-        # Transfer predictions back
+        inf_t = time.time() - t_start
+
+        # device to host memory
         cuda.memcpy_dtoh_async(self.output, self.d_output, self.stream)
+
         # Syncronize threads
         self.stream.synchronize()
 
-        return (t_inference, self.output) if eval_exec_time else self.output
+        accuracy = self.accuracy(self.output, y)
+        self.log_dict({'accuracy/val': accuracy, 'InferenceTime(ms)/Val': inf_t,},
+                      on_step=False, on_epoch=True, prog_bar=True, logger=True)
