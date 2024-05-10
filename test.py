@@ -12,8 +12,9 @@ import torch
 
 # Custom packages
 from src.dataset import TinyImageNetDatasetModule
-from src.network import SimpleClassifier
+from src.network import SimpleClassifier, TRTclassifier
 #import src.config as cfg
+from .tensorRT import converter
 
 # Using hydra for config management
 import os
@@ -35,10 +36,22 @@ def test(cfg: DictConfig):
     #     help = 'Model checkpoint file name')
     # args = args.parse_args()
 
+    if cfg.EXPORT:
+        print('Exporting model to ONNX format')
+        filepath = f'{cfg.CKPT}/{cfg.MODEL_NAME}_classifier.onnx'
+        input_sample = torch.randn(1, 3, 64, 64)
+        model.to_onnx(filepath, input_sample, export_params=True)
+        converter(filepath, f'{cfg.CKPT}/{cfg.MODEL_NAME}_classifier.engine', True)
+
     model = SimpleClassifier(
         cfg=cfg,
         model_name = cfg.MODEL_NAME,
         num_classes = cfg.NUM_CLASSES,
+    )
+
+    TRTmodel = TRTclassifier(
+        num_classes=cfg.NUM_CLASSES,
+        file_path=f'{cfg.CKPT}/{cfg.MODEL_NAME}_classifier.engine'
     )
 
     datamodule = TinyImageNetDatasetModule(
@@ -59,13 +72,7 @@ def test(cfg: DictConfig):
     model.eval()
     
     trainer.validate(model, datamodule = datamodule)
-    if cfg.EXPORT:
-        print('Exporting model to ONNX format')
-        filepath = f'{cfg.CKPT}/{cfg.MODEL_NAME}_classifier.onnx'
-        input_sample = torch.randn(1, 3, 64, 64)
-        model.to_onnx(filepath, input_sample, export_params=True)
-        
-    
+
     # FLOP counter
     x, y = next(iter(datamodule.test_dataloader()))
     flop_counter = FlopCounterMode(model, depth=1)
