@@ -10,10 +10,11 @@ class MyF1Score(Metric):
         self.add_state('tp', default=torch.zeros(cls_num), dist_reduce_fx='sum')
         self.add_state('fp', default=torch.zeros(cls_num), dist_reduce_fx='sum')
         self.add_state('fn', default=torch.zeros(cls_num), dist_reduce_fx='sum')
-    
-    def update(self, cls_num, preds, target):
+        self.cls_num = cls_num
+        
+    def update(self, preds, target):
         preds = torch.argmax(preds, dim=1)
-        for i in range(cls_num):
+        for i in range(self.cls_num):
             tp = ((target==i) & (preds==i)).sum().item()
             fp = ((target!=i) & (preds==i)).sum().item()
             fn = ((target==i) & (preds!=i)).sum().item()

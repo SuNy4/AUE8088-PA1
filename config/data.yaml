@@ -1,5 +1,5 @@
 # Data Setting
-DATASET_ROOT_PATH: /home/sungjin/data/datasets/
+DATASET_ROOT_PATH: /data/datasets/
 NUM_WORKERS: 8
 
 #IMG Augmentation

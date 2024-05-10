@@ -128,3 +128,4 @@ venv.bak/
 # Hydra Settings & Wandb logs
 outputs/
 wandb/
+multirun/
